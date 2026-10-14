@@ -1,251 +1,440 @@
+
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <cstring>
+#include <cmath>
 
 #include "config.h"
 #include "mqtt_client.h"
+#include "gateway.h"
 
 // ==================================================
-// CENTRAL GATEWAY
-// DATA SIMULATOR + PROCESSOR + MQTT PUBLISHER
+// UART2: SENSOR NODE -> CENTRAL GATEWAY
 // ==================================================
 
-struct NodeData {
-  const char* node_id;
-  float temp;
-  int smoke_adc;
-  float smoke_ppm;
-  bool smoke_ppm_valid;
-  bool flame;
-  float ror;
-  float fri;
-  bool relay;
-  bool buzzer;
-  const char* status;
-  int error_code;
+namespace
+{
+    constexpr int UART2_RX_PIN = 16;
+    constexpr int UART2_TX_PIN = 17;
+    constexpr uint32_t UART2_BAUD = 115200;
+
+    constexpr size_t UART_BUFFER_SIZE = 256;
+
+    constexpr float TEMP_WARNING = 40.0f;
+    constexpr float TEMP_FIRE = 60.0f;
+    constexpr int SMOKE_WARNING_ADC = 350;
+    constexpr int SMOKE_FIRE_ADC = 700;
+    constexpr float FRI_WARNING = 35.0f;
+    constexpr float FRI_FIRE = 70.0f;
+
+    constexpr int ERROR_OK = 0;
+    constexpr int ERROR_TEMP_INVALID = 1;
+    constexpr int ERROR_SMOKE_ADC_INVALID = 2;
+    constexpr int ERROR_ANALYTICS_INVALID = 3;
+
+    char uartBuffer[UART_BUFFER_SIZE];
+    size_t uartIndex = 0;
+
+    unsigned long lastValidMessageMs = 0;
+    unsigned long lastTimeoutLogMs = 0;
+
+    bool receivedAnyValidMessage = false;
+}
+
+// ==================================================
+// DATA STRUCTURE
+// ==================================================
+
+struct NodeData
+{
+    char node_id[32] = {};
+
+    float temp = 0.0f;
+    bool temp_valid = false;
+
+    int smoke_adc = 0;
+    bool smoke_adc_valid = false;
+
+    float smoke_ppm = 0.0f;
+    bool smoke_ppm_valid = false;
+
+    bool flame = false;
+
+    float ror = 0.0f;
+    bool ror_valid = false;
+
+    float fri = 0.0f;
+    bool fri_valid = false;
+
+    bool relay = false;
+    bool buzzer = false;
+
+    char status[16] = "UNKNOWN";
+    int error_code = 0;
 };
 
-// ==================================================
-// 1. DU LIEU GIA CUA 2 NODE
-// ==================================================
 
-NodeData nodeKitchen = {
-  "NODE_KITCHEN_01",
-  32.5,
-  67,
-  0.0,
-  false,
-  false,
-  0.2,
-  12,
-  false,
-  false,
-  "NORMAL",
-  0
-};
-
-NodeData nodeRoom = {
-  "NODE_ROOM_02",
-  43.8,
-  420,
-  0.0,
-  false,
-  false,
-  1.1,
-  38,
-  false,
-  false,
-  "WARNING",
-  0
-};
 
 // ==================================================
-// 2. CAC NGUONG MO PHONG
-// CHI DUNG DE KIEM THU SOFTWARE
+// DATA PROCESSOR
 // ==================================================
 
-namespace {
-  constexpr float TEMP_WARNING = 40.0;
-  constexpr float TEMP_FIRE = 60.0;
+static void processNodeData(NodeData &node)
+{
+    node.error_code = ERROR_OK;
 
-  constexpr int SMOKE_WARNING_ADC = 350;
-  constexpr int SMOKE_FIRE_ADC = 700;
+    // Chỉ kiểm tra các trường hiện có dữ liệu.
+    if (node.temp_valid &&
+        (!isfinite(node.temp) ||
+         node.temp < -55.0f || node.temp > 125.0f))
+    {
+        node.error_code = ERROR_TEMP_INVALID;
+    }
+    else if (!node.smoke_adc_valid)
+    {
+        node.error_code = ERROR_SMOKE_ADC_INVALID;
+    }
+    else if ((node.ror_valid &&
+              (!isfinite(node.ror) || node.ror < 0.0f)) ||
+             (node.fri_valid &&
+              (!isfinite(node.fri) || node.fri < 0.0f)))
+    {
+        node.error_code = ERROR_ANALYTICS_INVALID;
+    }
 
-  constexpr float FRI_WARNING = 35.0;
-  constexpr float FRI_FIRE = 70.0;
+    if (node.error_code != ERROR_OK)
+    {
+        strlcpy(node.status, "SENSOR_ERROR", sizeof(node.status));
+        return;
+    }
 
-  constexpr int ERROR_OK = 0;
-  constexpr int ERROR_TEMP_INVALID = 1;
-  constexpr int ERROR_SMOKE_ADC_INVALID = 2;
+    const bool fireDetected =
+        node.flame ||
+        (node.temp_valid && node.temp >= TEMP_FIRE) ||
+        node.smoke_adc >= SMOKE_FIRE_ADC ||
+        (node.fri_valid && node.fri >= FRI_FIRE);
+
+    const bool warningDetected =
+        (node.temp_valid && node.temp >= TEMP_WARNING) ||
+        node.smoke_adc >= SMOKE_WARNING_ADC ||
+        (node.fri_valid && node.fri >= FRI_WARNING);
+
+    if (fireDetected)
+    {
+        strlcpy(node.status, "FIRE", sizeof(node.status));
+        node.relay = true;
+        node.buzzer = true;
+    }
+    else if (warningDetected)
+    {
+        strlcpy(node.status, "WARNING", sizeof(node.status));
+        node.relay = false;
+        node.buzzer = false;
+    }
+    else
+    {
+        strlcpy(node.status, "NORMAL", sizeof(node.status));
+        node.relay = false;
+        node.buzzer = false;
+    }
 }
 
 // ==================================================
-// 3. DATA PROCESSOR
+// PARSE REAL JSON FROM SENSOR NODE
+// Expected fields:
+// node_id, temp, smoke_adc, smoke_ppm, flame, ror, fri
 // ==================================================
 
-void processNodeData(NodeData& node) {
-  node.error_code = ERROR_OK;
+static bool parseNodeJson(const char *line, NodeData &node)
+{
+    JsonDocument doc;
 
-  // Kiem tra nhiet do
-  if (isnan(node.temp) || node.temp < -55.0 || node.temp > 125.0) {
-    node.error_code = ERROR_TEMP_INVALID;
-  }
+    DeserializationError err = deserializeJson(doc, line);
+    if (err)
+    {
+        Serial.printf("[UART2] Invalid JSON: %s\n", err.c_str());
+        return false;
+    }
 
-  // Kiem tra ADC cua MQ-2
-  if (node.smoke_adc < 0 || node.smoke_adc > 4095) {
-    node.error_code = ERROR_SMOKE_ADC_INVALID;
-  }
+    if (!doc["node_id"].is<const char *>() ||
+        !doc["sensors"].is<JsonObject>() ||
+        !doc["status"].is<const char *>())
+    {
+        Serial.println("[UART2] Missing required fields");
+        return false;
+    }
 
-  // Khong ket luan NORMAL neu du lieu loi
-  if (node.error_code != ERROR_OK) {
-    node.status = "SENSOR_ERROR";
-    node.relay = false;
-    node.buzzer = false;
-    return;
-  }
+    const char *id = doc["node_id"].as<const char *>();
 
-  // Danh gia muc do rui ro
-  bool fireDetected =
-    node.flame ||
-    node.temp >= TEMP_FIRE ||
-    node.smoke_adc >= SMOKE_FIRE_ADC ||
-    node.fri >= FRI_FIRE;
+    if (id == nullptr ||
+        (strcmp(id, "NODE_KITCHEN_01") != 0 &&
+         strcmp(id, "NODE_ROOM_02") != 0))
+    {
+        Serial.println("[UART2] Unknown node_id");
+        return false;
+    }
 
-  bool warningDetected =
-    node.temp >= TEMP_WARNING ||
-    node.smoke_adc >= SMOKE_WARNING_ADC ||
-    node.fri >= FRI_WARNING;
+    strlcpy(node.node_id, id, sizeof(node.node_id));
 
-  if (fireDetected) {
-    node.status = "FIRE";
-    node.relay = true;
-    node.buzzer = true;
-  } else if (warningDetected) {
-    node.status = "WARNING";
-    node.relay = false;
-    node.buzzer = false;
-  } else {
-    node.status = "NORMAL";
-    node.relay = false;
-    node.buzzer = false;
-  }
+    JsonObject sensors = doc["sensors"].as<JsonObject>();
+    JsonObject analytics = doc["analytics"].as<JsonObject>();
+    JsonObject actuators = doc["actuators"].as<JsonObject>();
+
+    // Temperature: chấp nhận số hoặc null.
+    JsonVariant temp = sensors["temp"];
+    node.temp_valid = !temp.isNull() &&
+                      (temp.is<float>() || temp.is<int>());
+
+    if (node.temp_valid)
+    {
+        node.temp = temp.as<float>();
+    }
+
+    // Smoke ADC là trường cần có và phải là số nguyên.
+    JsonVariant smoke = sensors["smoke_adc"];
+    if (smoke.isNull() || !smoke.is<int>())
+    {
+        Serial.println("[UART2] Missing or invalid sensors.smoke_adc");
+        return false;
+    }
+
+    node.smoke_adc = smoke.as<int>();
+    node.smoke_adc_valid =
+        node.smoke_adc >= 0 && node.smoke_adc <= 4095;
+
+    if (!node.smoke_adc_valid)
+    {
+        Serial.println("[UART2] smoke_adc out of range");
+        return false;
+    }
+
+    // Flame phải là boolean.
+    if (!sensors["flame"].is<bool>())
+    {
+        Serial.println("[UART2] Missing or invalid sensors.flame");
+        return false;
+    }
+    node.flame = sensors["flame"].as<bool>();
+
+    // Smoke PPM: cho phép null.
+    JsonVariant ppm = sensors["smoke_ppm"];
+    node.smoke_ppm_valid = !ppm.isNull() &&
+                           (ppm.is<float>() || ppm.is<int>());
+
+    if (node.smoke_ppm_valid)
+    {
+        node.smoke_ppm = ppm.as<float>();
+        if (!isfinite(node.smoke_ppm) || node.smoke_ppm < 0.0f)
+        {
+            node.smoke_ppm_valid = false;
+        }
+    }
+
+    // ROR và FRI: cho phép null khi thuật toán chưa tích hợp.
+    JsonVariant ror = analytics["ror"];
+    node.ror_valid = !ror.isNull() &&
+                     (ror.is<float>() || ror.is<int>());
+
+    if (node.ror_valid)
+    {
+        node.ror = ror.as<float>();
+        if (!isfinite(node.ror) || node.ror < 0.0f)
+        {
+            node.ror_valid = false;
+        }
+    }
+
+    JsonVariant fri = analytics["fri"];
+    node.fri_valid = !fri.isNull() &&
+                     (fri.is<float>() || fri.is<int>());
+
+    if (node.fri_valid)
+    {
+        node.fri = fri.as<float>();
+        if (!isfinite(node.fri) || node.fri < 0.0f)
+        {
+            node.fri_valid = false;
+        }
+    }
+
+    // Giữ trạng thái và cơ cấu chấp hành do Sensor Node gửi.
+    // Gateway không tự giả định trạng thái cảm biến chưa tích hợp.
+    if (doc["status"].is<const char *>())
+    {
+        strlcpy(node.status, doc["status"], sizeof(node.status));
+    }
+
+    node.relay = actuators["relay"] | false;
+    node.buzzer = actuators["buzzer"] | false;
+    node.error_code = doc["error_code"] | 0;
+
+    return true;
 }
 
 // ==================================================
-// 4. XAC DINH MQTT TOPIC THEO NODE
+// BUILD JSON AND PUBLISH MQTT
 // ==================================================
 
-const char* getNodeTopic(const char* nodeId) {
-  if (strcmp(nodeId, "NODE_KITCHEN_01") == 0) {
-    return MQTT_TOPIC_KITCHEN;
-  }
+static void publishNodeData(NodeData &node)
+{
+    processNodeData(node);
 
-  if (strcmp(nodeId, "NODE_ROOM_02") == 0) {
-    return MQTT_TOPIC_ROOM;
-  }
+    JsonDocument doc;
 
-  return nullptr;
-}
+    doc["node_id"] = node.node_id;
+    doc["timestamp"] = millis();
 
-// ==================================================
-// 5. TAO JSON, IN SERIAL VA PUBLISH MQTT
-// ==================================================
+    JsonObject sensors = doc["sensors"].to<JsonObject>();
 
-void printNodeJson(const NodeData& node) {
-  JsonDocument doc;
+    if (node.temp_valid)
+    {
+        sensors["temp"] = node.temp;
+    }
+    else
+    {
+        sensors["temp"] = nullptr;
+    }
 
-  doc["node_id"] = node.node_id;
-  doc["timestamp"] = millis();
+    sensors["smoke_adc"] = node.smoke_adc;
 
-  JsonObject sensors = doc["sensors"].to<JsonObject>();
-  sensors["temp"] = node.temp;
-  sensors["smoke_adc"] = node.smoke_adc;
+    if (node.smoke_ppm_valid)
+    {
+        sensors["smoke_ppm"] = node.smoke_ppm;
+    }
+    else
+    {
+        sensors["smoke_ppm"] = nullptr;
+    }
 
-  if (node.smoke_ppm_valid) {
-    sensors["smoke_ppm"] = node.smoke_ppm;
-  } else {
-    sensors["smoke_ppm"] = nullptr;
-  }
+    sensors["flame"] = node.flame;
 
-  sensors["flame"] = node.flame;
+    JsonObject analytics = doc["analytics"].to<JsonObject>();
 
-  JsonObject analytics = doc["analytics"].to<JsonObject>();
-  analytics["ror"] = node.ror;
-  analytics["fri"] = node.fri;
+    if (node.ror_valid)
+    {
+        analytics["ror"] = node.ror;
+    }
+    else
+    {
+        analytics["ror"] = nullptr;
+    }
 
-  JsonObject actuators = doc["actuators"].to<JsonObject>();
-  actuators["relay"] = node.relay;
-  actuators["buzzer"] = node.buzzer;
+    if (node.fri_valid)
+    {
+        analytics["fri"] = node.fri;
+    }
+    else
+    {
+        analytics["fri"] = nullptr;
+    }
 
-  doc["status"] = node.status;
-  doc["error_code"] = node.error_code;
+    JsonObject actuators = doc["actuators"].to<JsonObject>();
+    actuators["relay"] = node.relay;
+    actuators["buzzer"] = node.buzzer;
 
-  // In JSON ra Serial Monitor
-  Serial.println("[OUTPUT] Processed JSON:");
-  serializeJsonPretty(doc, Serial);
-  Serial.println();
+    doc["status"] = node.status;
+    doc["error_code"] = node.error_code;
 
-  // Xac dinh topic va gui JSON len MQTT
-  const char* topic = getNodeTopic(node.node_id);
-
-  if (topic == nullptr) {
-    Serial.println("[MQTT] Publish skipped: unknown node");
-    return;
-  }
-
-  mqttPublishJson(topic, doc);
-}
-
-// ==================================================
-// 6. KHOI TAO SIMULATOR
-// ==================================================
-
-void simulatorInit() {
-  Serial.println();
-  Serial.println("================================");
-  Serial.println("        CENTRAL GATEWAY");
-  Serial.println(" DATA SIMULATOR + PROCESSOR + MQTT");
-  Serial.println("================================");
-  Serial.println("Configured nodes: 2");
-  Serial.println("NODE_KITCHEN_01");
-  Serial.println("NODE_ROOM_02");
-}
-
-// ==================================================
-// 7. MOI CHU KY:
-// SIMULATE -> PROCESS -> OUTPUT -> MQTT
-// ==================================================
-
-void simulatorUpdate() {
-  Serial.println();
-  Serial.println("========== GATEWAY CYCLE ==========");
-
-  NodeData* nodes[] = { &nodeKitchen, &nodeRoom };
-
-  for (NodeData* node : nodes) {
+    Serial.println("[OUTPUT] Processed real sensor data:");
+    serializeJsonPretty(doc, Serial);
     Serial.println();
-    Serial.print("[INPUT] ");
-    Serial.println(node->node_id);
 
-    // Du lieu gia hien tai
-    Serial.print("Temperature: ");
-    Serial.println(node->temp);
+    Serial.print("[MQTT] Publishing all-node topic: ");
+    Serial.println(MQTT_TOPIC_ALL);
 
-    Serial.print("Smoke ADC: ");
-    Serial.println(node->smoke_adc);
+    mqttPublishJson(MQTT_TOPIC_ALL, doc);
+}
 
-    // Xu ly du lieu
-    processNodeData(*node);
+// ==================================================
+// PUBLIC FUNCTIONS
+// ==================================================
 
-    Serial.print("[PROCESSOR] Status: ");
-    Serial.println(node->status);
+void gatewayInit()
+{
+    Serial2.begin(
+        UART2_BAUD,
+        SERIAL_8N1,
+        UART2_RX_PIN,
+        UART2_TX_PIN);
 
-    Serial.print("[PROCESSOR] Error code: ");
-    Serial.println(node->error_code);
+    uartIndex = 0;
+    receivedAnyValidMessage = false;
 
-    // Tao JSON va thu gui len MQTT
-    printNodeJson(*node);
-  }
+    Serial.println();
+    Serial.println("========== CENTRAL GATEWAY ==========");
+    Serial.println("[UART2] Waiting for real sensor data");
+    Serial.printf("[UART2] RX=%d TX=%d baud=%lu\n",
+                  UART2_RX_PIN,
+                  UART2_TX_PIN,
+                  (unsigned long)UART2_BAUD);
+}
 
-  Serial.println("======== END GATEWAY CYCLE ========");
+void gatewayUpdate()
+{
+    while (Serial2.available() > 0)
+    {
+        const char c = static_cast<char>(Serial2.read());
+
+        if (c == '\r')
+        {
+            continue;
+        }
+
+        if (c == '\n')
+        {
+            uartBuffer[uartIndex] = '\0';
+
+            if (uartIndex > 0)
+            {
+                NodeData node = {};
+
+                Serial.printf("[UART2] RX: %s\n", uartBuffer);
+
+                if (parseNodeJson(uartBuffer, node))
+                {
+                    receivedAnyValidMessage = true;
+                    lastValidMessageMs = millis();
+                    publishNodeData(node);
+                }
+                else
+                {
+                    Serial.println("[UART2] Message rejected");
+                }
+            }
+
+            uartIndex = 0;
+            continue;
+        }
+
+        if (uartIndex < UART_BUFFER_SIZE - 1)
+        {
+            uartBuffer[uartIndex++] = c;
+        }
+        else
+        {
+            uartIndex = 0;
+            Serial.println("[UART2] Message too long; discarded");
+        }
+    }
+
+    // Chi ghi log khi chua nhan duoc ban tin hop le.
+    // Khong tao du lieu thay the va khong publish du lieu gia.
+    if (!receivedAnyValidMessage &&
+        millis() - lastTimeoutLogMs >= 5000)
+    {
+        lastTimeoutLogMs = millis();
+        Serial.println("[UART2] No valid sensor data received yet");
+    }
+
+    if (receivedAnyValidMessage &&
+        millis() - lastValidMessageMs >= 5000)
+    {
+        // Chi canh bao tren Serial; khong tu tao ban tin MQTT.
+        if (millis() - lastTimeoutLogMs >= 5000)
+        {
+            lastTimeoutLogMs = millis();
+            Serial.println("[UART2] Warning: sensor data timeout");
+        }
+    }
 }

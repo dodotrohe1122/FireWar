@@ -1,41 +1,29 @@
 
 #include <Arduino.h>
+
 #include "mqtt_client.h"
-
-// Khai bao cac ham trong gateway.cpp
-void simulatorInit();
-void simulatorUpdate();
-
-const unsigned long SIMULATOR_INTERVAL = 5000;
-unsigned long lastUpdate = 0;
+#include "gateway.h"
 
 void setup() {
-    Serial.begin(115200);
-    delay(1000);
+  Serial.begin(115200);
+  delay(1000);
 
-    Serial.println("\n========== GATEWAY START ==========");
+  Serial.println();
+  Serial.println("========== GATEWAY START ==========");
 
-    // Khoi tao MQTT va ket noi Wi-Fi
-    mqttInit();
+  // Khoi tao UART2 nhan du lieu that
+  gatewayInit();
 
-    // Khoi tao bo mo phong
-    simulatorInit();
-  
-
-    lastUpdate = millis();
+  // Khoi tao MQTT/Wi-Fi hien co
+  mqttInit();
 }
 
 void loop() {
-    // Duy tri ket noi MQTT
-    mqttLoop();
+  // Duy tri ket noi MQTT hien tai
+  mqttLoop();
 
-    // Cap nhat du lieu mo phong moi 5 giay
-    unsigned long now = millis();
+  // Doc du lieu that tu Sensor Node
+  gatewayUpdate();
 
-    if (now - lastUpdate >= SIMULATOR_INTERVAL) {
-        lastUpdate = now;
-        simulatorUpdate();
-    }
-
-    delay(5);
+  delay(2);
 }

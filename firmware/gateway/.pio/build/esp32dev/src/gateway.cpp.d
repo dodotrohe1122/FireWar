@@ -136,4 +136,4 @@
  .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson.h \
  .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson.hpp \
  .pio/libdeps/esp32dev/ArduinoJson/src/ArduinoJson/Configuration.hpp \
- include/config.h include/mqtt_client.h
+ include/config.h include/mqtt_client.h include/gateway.h
