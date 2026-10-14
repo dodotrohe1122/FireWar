@@ -5,11 +5,12 @@
 #include "sensors.h"
 #include "analytics.h"
 #include "rs485_comm.h"
+#include "RoR.cpp"
 
 // =========================
 // SETUP
 // =========================
-
+RateOfRiseDetector rorDetector;
 void setup()
 {
     Serial.begin(SERIAL_BAUDRATE);
@@ -81,6 +82,13 @@ void loop()
         digitalWrite(BUZZER_PIN, BUZZER_OFF);
     }
 
+    // ROR
+    float rorRate = 0.0;
+    float smoothT = 0.0;
+
+    HeatAlarmState state = rorDetector.update(sensorData.tempValue, rorRate, smoothT);
+
+
     // =========================
     // 4. CREATE JSON DOCUMENT
     // =========================
@@ -103,15 +111,12 @@ void loop()
     JsonObject sensors =
         doc["sensors"].to<JsonObject>();
 
-    // DS18B20 chưa tích hợp
-    sensors["temp"] = nullptr;
+    // DS18B20 
+    sensors["temp"] = sensorData.tempValue;
 
     // MQ-2 hiện tại là ADC
     sensors["smoke_adc"] =
         sensorData.mq2Value;
-
-    // Chưa chuyển sang PPM
-    sensors["smoke_ppm"] = nullptr;
 
     // Flame
     sensors["flame"] =
@@ -124,10 +129,8 @@ void loop()
     JsonObject analyticsObject =
         doc["analytics"].to<JsonObject>();
 
-    // Chưa triển khai ROR
-    analyticsObject["ror"] = nullptr;
+    analyticsObject["ror"] = rorRate;
 
-    // Chưa triển khai FRI
     analyticsObject["fri"] = nullptr;
 
     // =========================
@@ -137,10 +140,7 @@ void loop()
     JsonObject actuators =
         doc["actuators"].to<JsonObject>();
 
-    // Chưa có Relay
     actuators["relay"] = false;
-
-    // Buzzer thực tế
     actuators["buzzer"] =
         analytics.alarm;
 

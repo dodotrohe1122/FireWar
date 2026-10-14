@@ -11,8 +11,9 @@ struct AnalyticsData
 {
     bool smokeDetected;
     bool flameDetected;
+    bool tempDetected;
     bool alarm;
-
+    
     const char* status;
 };
 

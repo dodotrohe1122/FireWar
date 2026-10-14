@@ -1,13 +1,12 @@
 
-
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <cstring>
 #include <cmath>
-
 #include "config.h"
 #include "mqtt_client.h"
 #include "gateway.h"
+#include "send_telegram.h"
 
 // ==================================================
 // UART2: SENSOR NODE -> CENTRAL GATEWAY
@@ -56,9 +55,6 @@ struct NodeData
     int smoke_adc = 0;
     bool smoke_adc_valid = false;
 
-    float smoke_ppm = 0.0f;
-    bool smoke_ppm_valid = false;
-
     bool flame = false;
 
     float ror = 0.0f;
@@ -73,8 +69,6 @@ struct NodeData
     char status[16] = "UNKNOWN";
     int error_code = 0;
 };
-
-
 
 // ==================================================
 // DATA PROCESSOR
@@ -95,13 +89,7 @@ static void processNodeData(NodeData &node)
     {
         node.error_code = ERROR_SMOKE_ADC_INVALID;
     }
-    else if ((node.ror_valid &&
-              (!isfinite(node.ror) || node.ror < 0.0f)) ||
-             (node.fri_valid &&
-              (!isfinite(node.fri) || node.fri < 0.0f)))
-    {
-        node.error_code = ERROR_ANALYTICS_INVALID;
-    }
+    
 
     if (node.error_code != ERROR_OK)
     {
@@ -110,33 +98,29 @@ static void processNodeData(NodeData &node)
     }
 
     const bool fireDetected =
-        node.flame ||
-        (node.temp_valid && node.temp >= TEMP_FIRE) ||
-        node.smoke_adc >= SMOKE_FIRE_ADC ||
-        (node.fri_valid && node.fri >= FRI_FIRE);
-
+        node.flame || strcmp(node.status, "FIRE") == 0;
     const bool warningDetected =
-        (node.temp_valid && node.temp >= TEMP_WARNING) ||
-        node.smoke_adc >= SMOKE_WARNING_ADC ||
-        (node.fri_valid && node.fri >= FRI_WARNING);
+        strcmp(node.status, "WARNING") == 0;
 
     if (fireDetected)
     {
         strlcpy(node.status, "FIRE", sizeof(node.status));
+        sendTelegramAlert(String(node.node_id), node.temp, node.smoke_adc, node.ror);
         node.relay = true;
         node.buzzer = true;
     }
     else if (warningDetected)
     {
         strlcpy(node.status, "WARNING", sizeof(node.status));
+    }
+    else if (strcmp(node.status, "NORMAL") == 0)
+    {
         node.relay = false;
         node.buzzer = false;
     }
     else
     {
-        strlcpy(node.status, "NORMAL", sizeof(node.status));
-        node.relay = false;
-        node.buzzer = false;
+        strlcpy(node.status, "UNKNOWN", sizeof(node.status));
     }
 }
 
@@ -217,33 +201,26 @@ static bool parseNodeJson(const char *line, NodeData &node)
     }
     node.flame = sensors["flame"].as<bool>();
 
-    // Smoke PPM: cho phép null.
-    JsonVariant ppm = sensors["smoke_ppm"];
-    node.smoke_ppm_valid = !ppm.isNull() &&
-                           (ppm.is<float>() || ppm.is<int>());
-
-    if (node.smoke_ppm_valid)
+    JsonVariantConst ror = analytics["ror"];
+    if (!ror.isNull() && ror.is<float>())
     {
-        node.smoke_ppm = ppm.as<float>();
-        if (!isfinite(node.smoke_ppm) || node.smoke_ppm < 0.0f)
+        float val = ror.as<float>();
+        if (isfinite(val))
         {
-            node.smoke_ppm_valid = false;
+            node.ror = val;
+            node.ror_valid = true;
         }
-    }
-
-    // ROR và FRI: cho phép null khi thuật toán chưa tích hợp.
-    JsonVariant ror = analytics["ror"];
-    node.ror_valid = !ror.isNull() &&
-                     (ror.is<float>() || ror.is<int>());
-
-    if (node.ror_valid)
-    {
-        node.ror = ror.as<float>();
-        if (!isfinite(node.ror) || node.ror < 0.0f)
+        else
         {
+            node.ror = 0.0f;
             node.ror_valid = false;
         }
     }
+    else
+    {
+        node.ror = 0.0f; // Gán mặc định 0.0 khi ror là null
+        node.ror_valid = false;
+    };
 
     JsonVariant fri = analytics["fri"];
     node.fri_valid = !fri.isNull() &&
@@ -297,15 +274,6 @@ static void publishNodeData(NodeData &node)
     }
 
     sensors["smoke_adc"] = node.smoke_adc;
-
-    if (node.smoke_ppm_valid)
-    {
-        sensors["smoke_ppm"] = node.smoke_ppm;
-    }
-    else
-    {
-        sensors["smoke_ppm"] = nullptr;
-    }
 
     sensors["flame"] = node.flame;
 
