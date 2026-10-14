@@ -9,7 +9,7 @@ struct SensorData
 {
     int mq2Value;
     int flameValue;
-
+    float tempValue;
     bool flameDetected;
 };
 
