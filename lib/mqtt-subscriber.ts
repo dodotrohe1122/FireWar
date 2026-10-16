@@ -1,25 +1,6 @@
 import mqtt, { type MqttClient } from "mqtt";
-
-export interface FireNodeData {
-  node_id: string;
-  timestamp: number;
-  sensors: {
-    temp: number | null;
-    smoke_adc: number;
-    smoke_ppm: number | null;
-    flame: boolean;
-  };
-  analytics: {
-    ror: number | null;
-    fri: number | null;
-  };
-  actuators: {
-    relay: boolean;
-    buzzer: boolean;
-  };
-  status: string;
-  error_code: number;
-}
+import { saveNodeReading } from "@/lib/mongodb";
+import { isFireNodeData, type FireNodeData } from "@/models/node-reading";
 
 const globalForMqtt = globalThis as typeof globalThis & {
   fireMqttClient?: MqttClient;
@@ -63,14 +44,13 @@ export function getMqttClient() {
 
   client.on("message", (topic, message) => {
     try {
-      const data = JSON.parse(
-        message.toString()
-      ) as FireNodeData;
+      const parsed: unknown = JSON.parse(message.toString());
 
-      if (!data.node_id || !data.sensors) {
+      if (!isFireNodeData(parsed)) {
         console.error("[MQTT] Invalid node payload");
         return;
       }
+      const data = parsed;
 
       // Lưu dữ liệu mới nhất của từng node
       nodeData.set(data.node_id, data);
@@ -78,6 +58,13 @@ export function getMqttClient() {
       console.log(
         `[MQTT] ${topic} | ${data.node_id} | ${data.status}`
       );
+
+      void saveNodeReading(data, topic).catch((error: unknown) => {
+        console.error(
+          `[MongoDB] Failed to persist reading from ${data.node_id}:`,
+          error,
+        );
+      });
     } catch (error) {
       console.error("[MQTT] Invalid JSON:", error);
     }
