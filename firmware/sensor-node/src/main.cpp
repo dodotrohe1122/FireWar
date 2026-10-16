@@ -1,168 +1,129 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <cstring>
 
 #include "config.h"
 #include "sensors.h"
 #include "analytics.h"
-#include "rs485_comm.h"
-#include "RoR.cpp"
+#include "uart_link.h"
+#include "rate_of_rise.h"
 
-// =========================
-// SETUP
-// =========================
-RateOfRiseDetector rorDetector;
-void setup()
+namespace
 {
-    Serial.begin(SERIAL_BAUDRATE);
-
-    // =========================
-    // INITIALIZE SENSORS
-    // =========================
-
-    sensors_init();
-
-    // =========================
-    // INITIALIZE BUZZER
-    // =========================
-
-    pinMode(BUZZER_PIN, OUTPUT);
-
-    // Buzzer Active-Low
-    // HIGH = OFF
-
-    digitalWrite(BUZZER_PIN, BUZZER_OFF);
-
-    // =========================
-    // INITIALIZE RS485
-    // =========================
-
-    rs485_init();
-
-    // =========================
-    // START MESSAGE
-    // =========================
-
-    Serial.println();
-    Serial.println("================================");
-    Serial.println("      NODE_01 SENSOR TEST");
-    Serial.println("      ESP32 + MQ-2 + FLAME");
-    Serial.println("      + BUZZER + JSON");
-    Serial.println("================================");
+    RateOfRiseDetector rorDetector;
+    SensorData latestSensorData = {};
+    AnalyticsData latestAnalytics = {};
+    float rorCPerSec = 0.0f;
+    float smoothedTemperatureC = 0.0f;
+    bool rorValid = false;
+    unsigned long nextSampleAt = 0;
 }
 
-// =========================
-// LOOP
-// =========================
-
-void loop()
+static void sendSensorSnapshot(unsigned long nowMs)
 {
-    // =========================
-    // 1. READ SENSORS
-    // =========================
-
-    SensorData sensorData = sensors_read();
-
-    // =========================
-    // 2. ANALYZE DATA
-    // =========================
-
-    AnalyticsData analytics =
-        analyze_data(sensorData);
-
-    // =========================
-    // 3. CONTROL BUZZER
-    // =========================
-
-    if (analytics.alarm)
+    SensorData evaluatedSensorData = latestSensorData;
+    if (evaluatedSensorData.tempValid && smoothedTemperatureC != 0.0f)
     {
-        digitalWrite(BUZZER_PIN, BUZZER_ON);
+        evaluatedSensorData.tempValue = smoothedTemperatureC;
+    }
+    latestAnalytics = analyze_data(
+        evaluatedSensorData,
+        rorValid,
+        rorCPerSec,
+        nowMs
+    );
+    control_buzzer(latestAnalytics, nowMs);
+
+    JsonDocument doc;
+    doc["node_id"] = NODE_ID;
+    doc["timestamp"] = nowMs;
+
+    JsonObject sensors = doc["sensors"].to<JsonObject>();
+    if (latestSensorData.tempValid)
+    {
+        sensors["temp"] = smoothedTemperatureC;
     }
     else
     {
-        digitalWrite(BUZZER_PIN, BUZZER_OFF);
+        sensors["temp"] = nullptr;
+    }
+    sensors["smoke_adc"] = latestSensorData.mq2Value;
+    sensors["flame"] = latestSensorData.flameDetected;
+
+    JsonObject analytics = doc["analytics"].to<JsonObject>();
+    if (rorValid)
+    {
+        analytics["ror"] = rorCPerSec;
+    }
+    else
+    {
+        analytics["ror"] = nullptr;
+    }
+    analytics["fri"] = nullptr;
+
+    JsonObject actuators = doc["actuators"].to<JsonObject>();
+    actuators["relay"] = false;
+    actuators["buzzer"] = digitalRead(BUZZER_PIN) == BUZZER_ON;
+
+    JsonArray reasons = doc["alert_reasons"].to<JsonArray>();
+    for (size_t i = 0; i < latestAnalytics.alertReasonCount; ++i)
+    {
+        reasons.add(latestAnalytics.alertReasons[i]);
     }
 
-    // ROR
-    float rorRate = 0.0;
-    float smoothT = 0.0;
+    doc["status"] = latestAnalytics.status;
+    doc["error_code"] = latestAnalytics.errorCode;
+    if (latestAnalytics.fireDetectedAtMs != 0)
+    {
+        doc["fire_detected_at_ms"] = latestAnalytics.fireDetectedAtMs;
+    }
+    else
+    {
+        doc["fire_detected_at_ms"] = nullptr;
+    }
 
-    HeatAlarmState state = rorDetector.update(sensorData.tempValue, rorRate, smoothT);
+    uartLinkSendJson(doc);
+}
 
+void setup()
+{
+    Serial.begin(SERIAL_BAUDRATE);
+    sensors_init();
 
-    // =========================
-    // 4. CREATE JSON DOCUMENT
-    // =========================
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, BUZZER_OFF);
 
-    JsonDocument doc;
+    uartLinkInit();
+    nextSampleAt = millis() + SENSOR_SAMPLE_INTERVAL_MS;
 
-    // =========================
-    // 5. BASIC INFORMATION
-    // =========================
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("   FIREWAR SENSOR NODE READY");
+    Serial.println("================================");
+}
 
-    doc["node_id"] = NODE_ID;
+void loop()
+{
+    const unsigned long nowMs = millis();
+    latestSensorData = sensors_read();
 
-    // Tạm thời chưa có NTP
-    doc["timestamp"] = 0;
+    if (latestSensorData.tempFresh && latestSensorData.tempValid)
+    {
+        rorValid = rorDetector.update(
+            latestSensorData.tempValue,
+            nowMs,
+            rorCPerSec,
+            smoothedTemperatureC
+        );
+    }
 
-    // =========================
-    // 6. SENSOR DATA
-    // =========================
-
-    JsonObject sensors =
-        doc["sensors"].to<JsonObject>();
-
-    // DS18B20 
-    sensors["temp"] = sensorData.tempValue;
-
-    // MQ-2 hiện tại là ADC
-    sensors["smoke_adc"] =
-        sensorData.mq2Value;
-
-    // Flame
-    sensors["flame"] =
-        sensorData.flameDetected;
-
-    // =========================
-    // 7. ANALYTICS
-    // =========================
-
-    JsonObject analyticsObject =
-        doc["analytics"].to<JsonObject>();
-
-    analyticsObject["ror"] = rorRate;
-
-    analyticsObject["fri"] = nullptr;
-
-    // =========================
-    // 8. ACTUATORS
-    // =========================
-
-    JsonObject actuators =
-        doc["actuators"].to<JsonObject>();
-
-    actuators["relay"] = false;
-    actuators["buzzer"] =
-        analytics.alarm;
-
-    // =========================
-    // 9. STATUS
-    // =========================
-
-    doc["status"] =
-        analytics.status;
-
-    // 0 = không có lỗi
-    doc["error_code"] = 0;
-
-    // =========================
-    // 10. SEND JSON
-    // =========================
-
-    rs485_send_json(doc);
-
-    // =========================
-    // LOOP DELAY
-    // =========================
-
-    delay(1000);
+    if (static_cast<int32_t>(nowMs - nextSampleAt) >= 0)
+    {
+        nextSampleAt = nowMs + SENSOR_SAMPLE_INTERVAL_MS;
+        sendSensorSnapshot(nowMs);
+    }
+    else
+    {
+        control_buzzer(latestAnalytics, nowMs);
+    }
 }

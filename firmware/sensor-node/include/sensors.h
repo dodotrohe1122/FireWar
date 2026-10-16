@@ -11,6 +11,10 @@ struct SensorData
     int flameValue;
     float tempValue;
     bool flameDetected;
+    bool tempValid;
+    bool tempFresh;
+    bool smokeValid;
+    bool flameValid;
 };
 
 // =========================
