@@ -6,7 +6,6 @@
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
   Serial.println();
   Serial.println("========== GATEWAY START ==========");
@@ -25,5 +24,5 @@ void loop() {
   // Doc du lieu that tu Sensor Node
   gatewayUpdate();
 
-  delay(2);
+  yield();
 }

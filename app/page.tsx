@@ -25,6 +25,8 @@ import {
   Tooltip,
 } from "recharts";
 import {
+  getAlertReasonLabel,
+  getGatewaySystemStatus,
   getLiveNodeLocation,
   getLiveNodeStatus,
   getLiveStatusClass,
@@ -153,6 +155,11 @@ export default function DashboardPage() {
   >({});
 
   useEffect(() => {
+    const clockTimer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(clockTimer);
+  }, []);
+
+  useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let activeRequest: AbortController | undefined;
@@ -255,6 +262,36 @@ export default function DashboardPage() {
       nodeLastDataAt[node.node_id]?.receivedAt,
     ),
   }));
+  const newestGatewayNode = nodes.reduce<LiveNode | null>(
+    (newest, node) =>
+      !newest || node.timestamp > newest.timestamp ? node : newest,
+    null,
+  );
+  const gatewayNodeReceivedAt = newestGatewayNode
+    ? nodeLastDataAt[newestGatewayNode.node_id]?.receivedAt
+    : undefined;
+  const systemStatus = newestGatewayNode
+    ? newestGatewayNode.system_status === "FIRE"
+      ? "fire"
+      : gatewayNodeReceivedAt !== undefined &&
+          now - gatewayNodeReceivedAt > 15_000
+        ? "offline"
+        : newestGatewayNode.system_status
+          ? getGatewaySystemStatus(newestGatewayNode.system_status)
+          : statusByNode.reduce<LiveNodeStatus>(
+              (highest, { status }) => {
+                const priority: Record<LiveNodeStatus, number> = {
+                  fire: 4,
+                  warning: 3,
+                  error: 2,
+                  offline: 1,
+                  normal: 0,
+                };
+                return priority[status] > priority[highest] ? status : highest;
+              },
+              "normal",
+            )
+    : "offline";
   const normalCount = statusByNode.filter(
     ({ status }) => status === "normal",
   ).length;
@@ -354,6 +391,24 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      <section
+        className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 ${getLiveStatusClass(systemStatus)}`}
+        aria-live="polite"
+      >
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide opacity-75">
+            Trạng thái toàn hệ thống từ Gateway
+          </p>
+          <p className="mt-1 text-sm font-bold">
+            {getLiveStatusLabel(systemStatus)}
+          </p>
+        </div>
+        <p className="text-xs">
+          Gateway tổng hợp trạng thái node; Dashboard không tự đánh giá ngưỡng
+          cảm biến.
+        </p>
+      </section>
+
       {errorMessage && (
         <div
           role="alert"
@@ -451,12 +506,14 @@ export default function DashboardPage() {
                       </span>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                      <span>Khói ADC: {node.sensors.smoke_adc}</span>
+                      <span>
+                        Khói ADC: {node.sensors.smoke_adc ?? "—"}
+                      </span>
                       <span>
                         Lửa: {node.sensors.flame ? "Phát hiện" : "Không"}
                       </span>
                       {node.analytics.ror !== null && (
-                        <span>RoR: {node.analytics.ror.toFixed(2)} °C/phút</span>
+                        <span>RoR: {node.analytics.ror.toFixed(3)} °C/s</span>
                       )}
                       {node.analytics.fri !== null && (
                         <span>FRI: {node.analytics.fri.toFixed(0)}</span>
@@ -489,7 +546,7 @@ export default function DashboardPage() {
                 Cảnh báo hiện tại
               </CardTitle>
               <p className="mt-1 text-xs text-slate-500">
-                Trạng thái suy ra từ lần dữ liệu mới nhất của các node.
+                Trạng thái và nguyên nhân do Sensor Node/Gateway gửi.
               </p>
             </div>
             <Link
@@ -521,6 +578,13 @@ export default function DashboardPage() {
                             ? `Cập nhật ${lastUpdated}`
                             : "Đang nhận dữ liệu"}
                         </p>
+                        {node.alert_reasons && node.alert_reasons.length > 0 && (
+                          <p className="mt-1 text-[11px] text-slate-600">
+                            {node.alert_reasons
+                              .map(getAlertReasonLabel)
+                              .join(" · ")}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <Badge

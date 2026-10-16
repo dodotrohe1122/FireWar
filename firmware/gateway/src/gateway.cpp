@@ -9,31 +9,26 @@
 #include "send_telegram.h"
 
 // ==================================================
-// UART2: SENSOR NODE -> CENTRAL GATEWAY
+// Direct UART2 link: SENSOR NODE ESP32 -> GATEWAY ESP32
 // ==================================================
 
 namespace
 {
-    constexpr int UART2_RX_PIN = 16;
-    constexpr int UART2_TX_PIN = 17;
-    constexpr uint32_t UART2_BAUD = 115200;
-
-    constexpr size_t UART_BUFFER_SIZE = 256;
-
-    constexpr float TEMP_WARNING = 40.0f;
-    constexpr float TEMP_FIRE = 60.0f;
-    constexpr int SMOKE_WARNING_ADC = 350;
-    constexpr int SMOKE_FIRE_ADC = 700;
-    constexpr float FRI_WARNING = 35.0f;
-    constexpr float FRI_FIRE = 70.0f;
+    constexpr size_t UART_BUFFER_SIZE = 1024;
 
     constexpr int ERROR_OK = 0;
     constexpr int ERROR_TEMP_INVALID = 1;
     constexpr int ERROR_SMOKE_ADC_INVALID = 2;
     constexpr int ERROR_ANALYTICS_INVALID = 3;
+    constexpr unsigned long NODE_TIMEOUT_MS = 15000UL;
+    constexpr size_t NODE_COUNT = 1;
+    const char* const EXPECTED_NODE_IDS[NODE_COUNT] = {
+        "NODE_KITCHEN_01"
+    };
 
     char uartBuffer[UART_BUFFER_SIZE];
     size_t uartIndex = 0;
+    bool uartFrameOverflow = false;
 
     unsigned long lastValidMessageMs = 0;
     unsigned long lastTimeoutLogMs = 0;
@@ -56,6 +51,7 @@ struct NodeData
     bool smoke_adc_valid = false;
 
     bool flame = false;
+    bool flame_valid = false;
 
     float ror = 0.0f;
     bool ror_valid = false;
@@ -68,59 +64,97 @@ struct NodeData
 
     char status[16] = "UNKNOWN";
     int error_code = 0;
+    char alertReasons[8][32] = {};
+    size_t alertReasonCount = 0;
+    unsigned long lastSeenMs = 0;
+    unsigned long fireDetectedAtMs = 0;
+    bool hasData = false;
 };
 
-// ==================================================
-// DATA PROCESSOR
-// ==================================================
-
-static void processNodeData(NodeData &node)
+namespace
 {
-    node.error_code = ERROR_OK;
+    NodeData nodeCache[NODE_COUNT] = {};
 
-    // Chỉ kiểm tra các trường hiện có dữ liệu.
-    if (node.temp_valid &&
-        (!isfinite(node.temp) ||
-         node.temp < -55.0f || node.temp > 125.0f))
+    int getExpectedNodeIndex(const char* nodeId)
     {
-        node.error_code = ERROR_TEMP_INVALID;
-    }
-    else if (!node.smoke_adc_valid)
-    {
-        node.error_code = ERROR_SMOKE_ADC_INVALID;
-    }
-    
-
-    if (node.error_code != ERROR_OK)
-    {
-        strlcpy(node.status, "SENSOR_ERROR", sizeof(node.status));
-        return;
+        for (size_t i = 0; i < NODE_COUNT; ++i)
+        {
+            if (strcmp(nodeId, EXPECTED_NODE_IDS[i]) == 0)
+            {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
     }
 
-    const bool fireDetected =
-        node.flame || strcmp(node.status, "FIRE") == 0;
-    const bool warningDetected =
-        strcmp(node.status, "WARNING") == 0;
+    const char* getSystemStatus(unsigned long nowMs)
+    {
+        bool hasOfflineNode = false;
+        bool hasErrorNode = false;
+        bool hasWarningNode = false;
+        bool hasFireNode = false;
 
-    if (fireDetected)
-    {
-        strlcpy(node.status, "FIRE", sizeof(node.status));
-        sendTelegramAlert(String(node.node_id), node.temp, node.smoke_adc, node.ror);
-        node.relay = true;
-        node.buzzer = true;
+        for (size_t i = 0; i < NODE_COUNT; ++i)
+        {
+            const NodeData& node = nodeCache[i];
+            hasFireNode |= node.hasData && strcmp(node.status, "FIRE") == 0;
+            if (!node.hasData || nowMs - node.lastSeenMs >= NODE_TIMEOUT_MS)
+            {
+                hasOfflineNode = true;
+                continue;
+            }
+
+            hasWarningNode |= strcmp(node.status, "WARNING") == 0;
+            hasErrorNode |= strcmp(node.status, "SENSOR_ERROR") == 0;
+        }
+
+        if (hasFireNode) return "FIRE";
+        if (hasWarningNode) return "WARNING";
+        if (hasErrorNode) return "SENSOR_ERROR";
+        if (hasOfflineNode) return "OFFLINE";
+        return "NORMAL";
     }
-    else if (warningDetected)
+
+    void normalizeNodeStatus(NodeData& node)
     {
-        strlcpy(node.status, "WARNING", sizeof(node.status));
-    }
-    else if (strcmp(node.status, "NORMAL") == 0)
-    {
-        node.relay = false;
-        node.buzzer = false;
-    }
-    else
-    {
-        strlcpy(node.status, "UNKNOWN", sizeof(node.status));
+        if (strcmp(node.status, "FIRE") == 0)
+        {
+            return;
+        }
+
+        if (node.error_code != ERROR_OK ||
+            !node.temp_valid ||
+            !node.smoke_adc_valid ||
+            !node.flame_valid ||
+            (strcmp(node.status, "NORMAL") != 0 &&
+             strcmp(node.status, "WARNING") != 0))
+        {
+            if (node.error_code == ERROR_OK)
+            {
+                if (!node.temp_valid)
+                {
+                    node.error_code = ERROR_TEMP_INVALID;
+                }
+                else if (!node.smoke_adc_valid || !node.flame_valid)
+                {
+                    node.error_code = ERROR_SMOKE_ADC_INVALID;
+                }
+                else
+                {
+                    node.error_code = ERROR_ANALYTICS_INVALID;
+                }
+            }
+            strlcpy(node.status, "SENSOR_ERROR", sizeof(node.status));
+            if (node.alertReasonCount < 8)
+            {
+                strlcpy(
+                    node.alertReasons[node.alertReasonCount++],
+                    !node.temp_valid ? "TEMP_SENSOR_ERROR" : "SENSOR_DATA_INVALID",
+                    sizeof(node.alertReasons[0])
+                );
+            }
+            return;
+        }
     }
 }
 
@@ -151,9 +185,7 @@ static bool parseNodeJson(const char *line, NodeData &node)
 
     const char *id = doc["node_id"].as<const char *>();
 
-    if (id == nullptr ||
-        (strcmp(id, "NODE_KITCHEN_01") != 0 &&
-         strcmp(id, "NODE_ROOM_02") != 0))
+    if (id == nullptr || getExpectedNodeIndex(id) < 0)
     {
         Serial.println("[UART2] Unknown node_id");
         return false;
@@ -173,33 +205,28 @@ static bool parseNodeJson(const char *line, NodeData &node)
     if (node.temp_valid)
     {
         node.temp = temp.as<float>();
+        node.temp_valid =
+            isfinite(node.temp) && node.temp >= -55.0f && node.temp <= 125.0f;
     }
 
-    // Smoke ADC là trường cần có và phải là số nguyên.
+    // MQ-2 remains raw ADC; null or out-of-range values are sensor errors.
     JsonVariant smoke = sensors["smoke_adc"];
-    if (smoke.isNull() || !smoke.is<int>())
-    {
-        Serial.println("[UART2] Missing or invalid sensors.smoke_adc");
-        return false;
-    }
-
-    node.smoke_adc = smoke.as<int>();
     node.smoke_adc_valid =
-        node.smoke_adc >= 0 && node.smoke_adc <= 4095;
-
-    if (!node.smoke_adc_valid)
+        !smoke.isNull() &&
+        (smoke.is<int>() || smoke.is<unsigned int>()) &&
+        smoke.as<int>() >= 0 &&
+        smoke.as<int>() <= 4095;
+    if (node.smoke_adc_valid)
     {
-        Serial.println("[UART2] smoke_adc out of range");
-        return false;
+        node.smoke_adc = smoke.as<int>();
     }
 
-    // Flame phải là boolean.
-    if (!sensors["flame"].is<bool>())
+    // Invalid flame data becomes an explicit node error, never a safe default.
+    node.flame_valid = sensors["flame"].is<bool>();
+    if (node.flame_valid)
     {
-        Serial.println("[UART2] Missing or invalid sensors.flame");
-        return false;
+        node.flame = sensors["flame"].as<bool>();
     }
-    node.flame = sensors["flame"].as<bool>();
 
     JsonVariantConst ror = analytics["ror"];
     if (!ror.isNull() && ror.is<float>())
@@ -241,10 +268,29 @@ static bool parseNodeJson(const char *line, NodeData &node)
     {
         strlcpy(node.status, doc["status"], sizeof(node.status));
     }
+    if (doc["error_code"].is<int>())
+    {
+        node.error_code = doc["error_code"].as<int>();
+    }
+    if (doc["fire_detected_at_ms"].is<unsigned long>())
+    {
+        node.fireDetectedAtMs =
+            doc["fire_detected_at_ms"].as<unsigned long>();
+    }
 
     node.relay = actuators["relay"] | false;
     node.buzzer = actuators["buzzer"] | false;
-    node.error_code = doc["error_code"] | 0;
+
+    JsonArrayConst reasons = doc["alert_reasons"].as<JsonArrayConst>();
+    for (JsonVariantConst reason : reasons)
+    {
+        if (node.alertReasonCount >= 8 || !reason.is<const char*>()) break;
+        strlcpy(
+            node.alertReasons[node.alertReasonCount++],
+            reason.as<const char*>(),
+            sizeof(node.alertReasons[0])
+        );
+    }
 
     return true;
 }
@@ -255,8 +301,6 @@ static bool parseNodeJson(const char *line, NodeData &node)
 
 static void publishNodeData(NodeData &node)
 {
-    processNodeData(node);
-
     JsonDocument doc;
 
     doc["node_id"] = node.node_id;
@@ -273,7 +317,14 @@ static void publishNodeData(NodeData &node)
         sensors["temp"] = nullptr;
     }
 
-    sensors["smoke_adc"] = node.smoke_adc;
+    if (node.smoke_adc_valid)
+    {
+        sensors["smoke_adc"] = node.smoke_adc;
+    }
+    else
+    {
+        sensors["smoke_adc"] = nullptr;
+    }
 
     sensors["flame"] = node.flame;
 
@@ -301,8 +352,23 @@ static void publishNodeData(NodeData &node)
     actuators["relay"] = node.relay;
     actuators["buzzer"] = node.buzzer;
 
+    JsonArray reasons = doc["alert_reasons"].to<JsonArray>();
+    for (size_t i = 0; i < node.alertReasonCount; ++i)
+    {
+        reasons.add(node.alertReasons[i]);
+    }
+
     doc["status"] = node.status;
     doc["error_code"] = node.error_code;
+    doc["system_status"] = getSystemStatus(millis());
+    if (node.fireDetectedAtMs != 0)
+    {
+        doc["fire_detected_at_ms"] = node.fireDetectedAtMs;
+    }
+    else
+    {
+        doc["fire_detected_at_ms"] = nullptr;
+    }
 
     Serial.println("[OUTPUT] Processed real sensor data:");
     serializeJsonPretty(doc, Serial);
@@ -320,22 +386,23 @@ static void publishNodeData(NodeData &node)
 
 void gatewayInit()
 {
+    Serial2.setRxBufferSize(UART_BUFFER_SIZE);
     Serial2.begin(
-        UART2_BAUD,
+        UART_LINK_BAUD,
         SERIAL_8N1,
-        UART2_RX_PIN,
-        UART2_TX_PIN);
+        UART_LINK_RX_PIN,
+        UART_LINK_TX_PIN);
 
     uartIndex = 0;
     receivedAnyValidMessage = false;
 
     Serial.println();
     Serial.println("========== CENTRAL GATEWAY ==========");
-    Serial.println("[UART2] Waiting for real sensor data");
+    Serial.println("[UART2] Waiting for direct Sensor Node ESP32 data");
     Serial.printf("[UART2] RX=%d TX=%d baud=%lu\n",
-                  UART2_RX_PIN,
-                  UART2_TX_PIN,
-                  (unsigned long)UART2_BAUD);
+                  UART_LINK_RX_PIN,
+                  UART_LINK_TX_PIN,
+                  (unsigned long)UART_LINK_BAUD);
 }
 
 void gatewayUpdate()
@@ -351,38 +418,77 @@ void gatewayUpdate()
 
         if (c == '\n')
         {
-            uartBuffer[uartIndex] = '\0';
-
-            if (uartIndex > 0)
+            if (uartFrameOverflow)
             {
-                NodeData node = {};
-
-                Serial.printf("[UART2] RX: %s\n", uartBuffer);
-
-                if (parseNodeJson(uartBuffer, node))
+                Serial.printf(
+                    "[UART2] Discarded oversized frame (limit %u bytes)\n",
+                    static_cast<unsigned>(UART_BUFFER_SIZE - 1)
+                );
+            }
+            else
+            {
+                uartBuffer[uartIndex] = '\0';
+                if (uartIndex > 0)
                 {
-                    receivedAnyValidMessage = true;
-                    lastValidMessageMs = millis();
-                    publishNodeData(node);
-                }
-                else
-                {
-                    Serial.println("[UART2] Message rejected");
+                    NodeData node = {};
+
+                    if (parseNodeJson(uartBuffer, node))
+                    {
+                        Serial.printf(
+                            "[UART2] Accepted %s frame (%u bytes), status=%s\n",
+                            node.node_id,
+                            static_cast<unsigned>(uartIndex),
+                            node.status
+                        );
+                        receivedAnyValidMessage = true;
+                        lastValidMessageMs = millis();
+                        const int nodeIndex = getExpectedNodeIndex(node.node_id);
+                        if (nodeIndex >= 0)
+                        {
+                            const bool wasFire =
+                                nodeCache[nodeIndex].hasData &&
+                                strcmp(nodeCache[nodeIndex].status, "FIRE") == 0;
+                            node.lastSeenMs = lastValidMessageMs;
+                            node.hasData = true;
+                            normalizeNodeStatus(node);
+                            nodeCache[nodeIndex] = node;
+                            if (!wasFire &&
+                                strcmp(nodeCache[nodeIndex].status, "FIRE") == 0)
+                            {
+                                sendTelegramAlert(
+                                    String(nodeCache[nodeIndex].node_id),
+                                    nodeCache[nodeIndex].temp_valid,
+                                    nodeCache[nodeIndex].temp,
+                                    nodeCache[nodeIndex].smoke_adc_valid,
+                                    nodeCache[nodeIndex].smoke_adc,
+                                    nodeCache[nodeIndex].ror_valid,
+                                    nodeCache[nodeIndex].ror
+                                );
+                            }
+                            publishNodeData(nodeCache[nodeIndex]);
+                        }
+                    }
+                    else
+                    {
+                        Serial.printf("[UART2] Invalid frame (%u bytes); message rejected\n",
+                                      static_cast<unsigned>(uartIndex));
+                    }
                 }
             }
 
             uartIndex = 0;
+            uartFrameOverflow = false;
             continue;
         }
 
-        if (uartIndex < UART_BUFFER_SIZE - 1)
+        if (!uartFrameOverflow && uartIndex < UART_BUFFER_SIZE - 1)
         {
             uartBuffer[uartIndex++] = c;
         }
-        else
+        else if (!uartFrameOverflow)
         {
             uartIndex = 0;
-            Serial.println("[UART2] Message too long; discarded");
+            uartFrameOverflow = true;
         }
     }
 

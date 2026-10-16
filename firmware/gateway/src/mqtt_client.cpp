@@ -19,28 +19,13 @@ bool mqttInit() {
     Serial.println();
     Serial.println("========== MQTT INIT ==========");
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    Serial.print("[WiFi] Connecting");
-
-    unsigned long startTime = millis();
-
-    while (WiFi.status() != WL_CONNECTED &&
-           millis() - startTime < 20000) {
-        Serial.print(".");
-        delay(500);
-    }
-
-    Serial.println();
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WiFi] Connection failed");
+    if (WIFI_SSID[0] == '\0' || WIFI_PASSWORD[0] == '\0') {
+        Serial.println("[WiFi] Missing credentials; configure ignored include/secrets.h");
         return false;
     }
 
-    Serial.print("[WiFi] IP: ");
-    Serial.println(WiFi.localIP());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     mqttClient.setServer(
         MQTT_BROKER_IP,
@@ -48,7 +33,9 @@ bool mqttInit() {
     );
 
     mqttClient.setBufferSize(2048);
+    lastReconnectAttempt = millis() - RECONNECT_INTERVAL;
 
+    Serial.println("[WiFi] Connection started asynchronously");
     Serial.println("[MQTT] Configuration complete");
     return true;
 }
@@ -56,6 +43,13 @@ bool mqttInit() {
 void mqttLoop() {
     if (WiFi.status() != WL_CONNECTED) {
         return;
+    }
+
+    static bool loggedWiFiReady = false;
+    if (!loggedWiFiReady) {
+        loggedWiFiReady = true;
+        Serial.print("[WiFi] IP: ");
+        Serial.println(WiFi.localIP());
     }
 
     if (mqttClient.connected()) {
