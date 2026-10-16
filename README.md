@@ -20,6 +20,37 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Live sensor data and MongoDB
+
+The dashboard reads the latest sensor values from the MQTT subscriber. The
+subscriber starts with the Next.js Node.js server, and each message received on
+`fire/gateway/GW_01/all` is saved as an individual MongoDB document so readings
+remain available after the app restarts. Keep the app server running to ingest
+readings; a serverless deployment that suspends background processes needs a
+separate always-on MQTT worker.
+
+Set these server-side environment variables before starting the app:
+
+```env
+MQTT_BROKER_URL=mqtt://127.0.0.1:1883
+MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_DB=firewar
+```
+
+For MongoDB Atlas, use the connection string from your Atlas cluster as
+`MONGODB_URI` and allow the app server's IP in the cluster network access list.
+Keep credentials in `.env.local` or your deployment's secret settings; do not
+expose the MongoDB URI with a `NEXT_PUBLIC_` variable.
+
+The app creates the `node_readings` collection and indexes automatically on
+first write. Each document contains the sensor payload, MQTT topic, and
+`received_at` server timestamp. MongoDB's TTL index expires each document 5
+minutes after it is received; MongoDB runs TTL cleanup asynchronously, and the
+history API also filters out readings older than 5 minutes. Read recent
+readings from `/api/nodes/history`; optionally filter with
+`?node_id=NODE_KITCHEN_01` and set `?limit=100` (maximum 500). The current
+in-memory readings remain available at `/api/nodes`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
