@@ -11,6 +11,7 @@
 // ==================================================
 // UART2: SENSOR NODE -> CENTRAL GATEWAY
 // ==================================================
+#define RS485_DE_RE_PIN 26
 
 namespace
 {
@@ -318,26 +319,27 @@ static void publishNodeData(NodeData &node)
 // PUBLIC FUNCTIONS
 // ==================================================
 
+
+
 void gatewayInit()
 {
+    pinMode(RS485_DE_RE_PIN, OUTPUT);
+
+    // DE = LOW, /RE = LOW: chế độ nhận
+    digitalWrite(RS485_DE_RE_PIN, LOW);
+
     Serial2.begin(
         UART2_BAUD,
         SERIAL_8N1,
         UART2_RX_PIN,
-        UART2_TX_PIN);
+        UART2_TX_PIN
+    );
 
     uartIndex = 0;
     receivedAnyValidMessage = false;
 
-    Serial.println();
-    Serial.println("========== CENTRAL GATEWAY ==========");
-    Serial.println("[UART2] Waiting for real sensor data");
-    Serial.printf("[UART2] RX=%d TX=%d baud=%lu\n",
-                  UART2_RX_PIN,
-                  UART2_TX_PIN,
-                  (unsigned long)UART2_BAUD);
+    Serial.println("[RS485] Gateway ready");
 }
-
 void gatewayUpdate()
 {
     while (Serial2.available() > 0)
