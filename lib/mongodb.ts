@@ -41,12 +41,13 @@ export async function getNodeReadingsCollection() {
 export async function saveNodeReading(
   reading: FireNodeData,
   topic: string,
+  receivedAt = new Date(),
 ) {
   const collection = await getNodeReadingsCollection();
 
   await collection.insertOne({
     ...reading,
-    received_at: new Date(),
+    received_at: receivedAt,
     topic,
   });
 }

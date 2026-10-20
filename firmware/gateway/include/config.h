@@ -6,7 +6,7 @@
 #define WIFI_PASSWORD "Tailadaicabadaobohuc123"
 
 // ================= MQTT CONFIG ================= // IPv4 của máy tính đang chạy Mosquitto 
-#define MQTT_BROKER_IP "192.168.1.6" 
+#define MQTT_BROKER_IP "192.168.1.7" 
 #define MQTT_BROKER_PORT 1883
 
 #define MQTT_CLIENT_ID "ESP32_GATEWAY_01"

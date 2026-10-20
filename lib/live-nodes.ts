@@ -10,6 +10,7 @@ export const liveNodeTimeoutMs = 15_000;
 export interface LiveNode {
   node_id: string;
   timestamp: number;
+  received_at: string;
   sensors: {
     temp: number | null;
     smoke_adc: number;
@@ -45,6 +46,8 @@ export function isLiveNode(value: unknown): value is LiveNode {
     typeof value.node_id === "string" &&
     typeof value.timestamp === "number" &&
     Number.isFinite(value.timestamp) &&
+    typeof value.received_at === "string" &&
+    Number.isFinite(Date.parse(value.received_at)) &&
     typeof value.status === "string" &&
     typeof value.error_code === "number" &&
     isRecord(sensors) &&
@@ -66,6 +69,10 @@ export function getLiveNodeStatus(
   if (lastDataAt !== undefined && now - lastDataAt > liveNodeTimeoutMs) {
     return "offline";
   }
+  return getReportedNodeStatus(node);
+}
+
+export function getReportedNodeStatus(node: LiveNode): LiveNodeStatus {
   if (node.error_code !== 0 || node.status === "SENSOR_ERROR") return "error";
   if (node.sensors.flame) return "fire";
   if (node.status === "WARNING") return "warning";

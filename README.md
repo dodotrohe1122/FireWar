@@ -22,12 +22,12 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## Live sensor data and MongoDB
 
-The dashboard reads the latest sensor values from the MQTT subscriber. The
-subscriber starts with the Next.js Node.js server, and each message received on
-`fire/gateway/GW_01/all` is saved as an individual MongoDB document so readings
-remain available after the app restarts. Keep the app server running to ingest
-readings; a serverless deployment that suspends background processes needs a
-separate always-on MQTT worker.
+The MQTT subscriber starts with the Next.js Node.js server, and each message
+received on `fire/gateway/GW_01/all` is saved as an individual MongoDB document.
+Dashboard and node screens query MongoDB for the latest reading per node; they
+do not read node values directly from the MQTT subscriber's in-memory cache.
+Keep the app server running to ingest readings; a serverless deployment that
+suspends background processes needs a separate always-on MQTT worker.
 
 Set these server-side environment variables before starting the app:
 
@@ -48,8 +48,15 @@ first write. Each document contains the sensor payload, MQTT topic, and
 minutes after it is received; MongoDB runs TTL cleanup asynchronously, and the
 history API also filters out readings older than 5 minutes. Read recent
 readings from `/api/nodes/history`; optionally filter with
-`?node_id=NODE_KITCHEN_01` and set `?limit=100` (maximum 500). The current
-in-memory readings remain available at `/api/nodes`.
+`?node_id=NODE_KITCHEN_01` and set `?limit=100` (maximum 500). The latest
+reading per node is available from `/api/nodes`, backed by MongoDB.
+
+The dashboard, building/node list, alerts, node details, and history screens
+use these live APIs rather than the original demo sensor/event records. Node
+locations are inferred only from recognizable node IDs (`KITCHEN` or `ROOM`);
+other IDs are shown as unconfigured instead of being assigned a made-up floor
+or room. The history screen displays received MQTT readings from MongoDB and
+therefore follows the five-minute retention window above.
 
 ## Learn More
 

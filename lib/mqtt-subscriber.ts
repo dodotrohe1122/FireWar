@@ -4,16 +4,21 @@ import { isFireNodeData, type FireNodeData } from "@/models/node-reading";
 
 const globalForMqtt = globalThis as typeof globalThis & {
   fireMqttClient?: MqttClient;
-  fireNodeData?: Map<string, FireNodeData>;
+  fireNodeData?: Map<string, { data: FireNodeData; receivedAt: Date }>;
 };
 
 const nodeData =
-  globalForMqtt.fireNodeData ?? new Map<string, FireNodeData>();
+  globalForMqtt.fireNodeData ??
+  new Map<string, { data: FireNodeData; receivedAt: Date }>();
 
 globalForMqtt.fireNodeData = nodeData;
 
 export function getNodeData() {
-  return Array.from(nodeData.values());
+  return Array.from(nodeData.values()).flatMap(({ data, receivedAt }) =>
+    data && receivedAt instanceof Date
+      ? [{ ...data, received_at: receivedAt.toISOString() }]
+      : [],
+  );
 }
 
 export function getMqttClient() {
@@ -22,7 +27,7 @@ export function getMqttClient() {
   }
 
   const brokerUrl =
-    process.env.MQTT_BROKER_URL ?? "mqtt://192.168.1.6:1883";
+    process.env.MQTT_BROKER_URL ?? "mqtt://192.168.1.7:1883";
 
   const client = mqtt.connect(brokerUrl, {
     clientId: `FIRE_NEXTJS_${process.pid}`,
@@ -53,13 +58,14 @@ export function getMqttClient() {
       const data = parsed;
 
       // Lưu dữ liệu mới nhất của từng node
-      nodeData.set(data.node_id, data);
+      const receivedAt = new Date();
+      nodeData.set(data.node_id, { data, receivedAt });
 
       console.log(
         `[MQTT] ${topic} | ${data.node_id} | ${data.status}`
       );
 
-      void saveNodeReading(data, topic).catch((error: unknown) => {
+      void saveNodeReading(data, topic, receivedAt).catch((error: unknown) => {
         console.error(
           `[MongoDB] Failed to persist reading from ${data.node_id}:`,
           error,

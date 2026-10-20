@@ -30,6 +30,7 @@ import {
   getLiveStatusClass,
   getLiveStatusLabel,
   isLiveNode,
+  liveNodeTimeoutMs,
   type LiveNode,
   type LiveNodeStatus,
 } from "@/lib/live-nodes";
@@ -38,6 +39,7 @@ type ConnectionState = "loading" | "connected" | "waiting" | "error";
 
 type TrendPoint = {
   time: string;
+  receivedAt: string;
   temperature: number | null;
   fri: number | null;
 };
@@ -125,16 +127,22 @@ function getAlertStyle(status: LiveNodeStatus) {
   }
 }
 
-function getFreshSample(nodes: LiveNode[], now: Date): TrendPoint {
+function getFreshSample(nodes: LiveNode[]): TrendPoint {
   const temperatures = nodes
     .map((node) => node.sensors.temp)
     .filter((value): value is number => value !== null && Number.isFinite(value));
   const friValues = nodes
     .map((node) => node.analytics.fri)
     .filter((value): value is number => value !== null && Number.isFinite(value));
+  const latestReceivedAt = nodes.reduce(
+    (latest, node) => Math.max(latest, Date.parse(node.received_at)),
+    0,
+  );
+  const receivedAt = new Date(latestReceivedAt);
 
   return {
-    time: getClockTime(now),
+    time: getClockTime(receivedAt),
+    receivedAt: receivedAt.toISOString(),
     temperature: temperatures.length ? Math.max(...temperatures) : null,
     fri: friValues.length ? Math.max(...friValues) : null,
   };
@@ -148,9 +156,6 @@ export default function DashboardPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [now, setNow] = useState(0);
-  const [nodeLastDataAt, setNodeLastDataAt] = useState<
-    Record<string, { timestamp: number; receivedAt: number }>
-  >({});
 
   useEffect(() => {
     let disposed = false;
@@ -193,30 +198,28 @@ export default function DashboardPage() {
         }
 
         if (disposed) return;
-        const receivedAt = new Date();
-        const receivedAtMs = receivedAt.getTime();
-        setNodeLastDataAt((current) => {
-          const updated = { ...current };
-          for (const node of liveNodes) {
-            const previous = current[node.node_id];
-            if (!previous || previous.timestamp !== node.timestamp) {
-              updated[node.node_id] = {
-                timestamp: node.timestamp,
-                receivedAt: receivedAtMs,
-              };
-            }
-          }
-          return updated;
-        });
+        const receivedAtMs = Date.now();
         setNow(receivedAtMs);
         setNodes(liveNodes);
-        setConnectionState(liveNodes.length ? "connected" : "waiting");
-        setLastUpdated(getClockTime(receivedAt));
+        setConnectionState(
+          liveNodes.some(
+            (node) => receivedAtMs - Date.parse(node.received_at) <= liveNodeTimeoutMs,
+          )
+            ? "connected"
+            : "waiting",
+        );
+        const latestReadingAt = liveNodes.reduce(
+          (latest, node) => Math.max(latest, Date.parse(node.received_at)),
+          0,
+        );
+        setLastUpdated(
+          latestReadingAt ? getClockTime(new Date(latestReadingAt)) : null,
+        );
         setErrorMessage(null);
         if (liveNodes.length) {
-          const sample = getFreshSample(liveNodes, receivedAt);
+          const sample = getFreshSample(liveNodes);
           setTrendData((current) => {
-            if (current.at(-1)?.time === sample.time) return current;
+            if (current.at(-1)?.receivedAt === sample.receivedAt) return current;
             return [...current, sample].slice(-40);
           });
         }
@@ -252,7 +255,7 @@ export default function DashboardPage() {
     status: getLiveNodeStatus(
       node,
       now,
-      nodeLastDataAt[node.node_id]?.receivedAt,
+      Date.parse(node.received_at),
     ),
   }));
   const normalCount = statusByNode.filter(
