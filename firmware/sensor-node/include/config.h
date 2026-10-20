@@ -25,7 +25,7 @@
 // SENSOR THRESHOLD
 // =========================
 
-#define MQ2_THRESHOLD 230
+#define MQ2_THRESHOLD 1100  
 
 // =========================
 // BUZZER CONFIGURATION

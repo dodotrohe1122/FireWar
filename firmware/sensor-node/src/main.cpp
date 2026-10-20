@@ -11,6 +11,7 @@
 // SETUP
 // =========================
 RateOfRiseDetector rorDetector;
+
 void setup()
 {
     Serial.begin(SERIAL_BAUDRATE);
@@ -18,151 +19,133 @@ void setup()
     // =========================
     // INITIALIZE SENSORS
     // =========================
-
     sensors_init();
 
     // =========================
     // INITIALIZE BUZZER
     // =========================
-
     pinMode(BUZZER_PIN, OUTPUT);
-
-    // Buzzer Active-Low
-    // HIGH = OFF
-
-    digitalWrite(BUZZER_PIN, BUZZER_OFF);
+    digitalWrite(BUZZER_PIN, BUZZER_OFF); // Buzzer Active-Low: HIGH = OFF
 
     // =========================
     // INITIALIZE RS485
     // =========================
-
     rs485_init();
 
     // =========================
     // START MESSAGE
     // =========================
-
     Serial.println();
     Serial.println("================================");
-    Serial.println("      NODE_01 SENSOR TEST");
-    Serial.println("      ESP32 + MQ-2 + FLAME");
-    Serial.println("      + BUZZER + JSON");
+    Serial.println("       NODE_01 SENSOR TEST");
+    Serial.println("       ESP32 + MQ-2 + FLAME");
+    Serial.println("       + BUZZER + JSON");
     Serial.println("================================");
 }
 
 // =========================
 // LOOP
 // =========================
-
 void loop()
 {
     // =========================
     // 1. READ SENSORS
     // =========================
-
     SensorData sensorData = sensors_read();
 
     // =========================
-    // 2. ANALYZE DATA
+    // 2. RATE OF RISE (RoR) CALCULATION
     // =========================
+    float rorRate = 0.0f;
+    float smoothT = 0.0f;
 
-    AnalyticsData analytics =
-        analyze_data(sensorData);
+    // Phải tính toán RoR TRƯỚC để cập nhật giá trị rorRate vào sensorData
+    rorDetector.update(sensorData.tempValue, rorRate, smoothT);
+    sensorData.rorRate = rorRate;
 
     // =========================
-    // 3. CONTROL BUZZER
+    // 3. ANALYZE DATA (4 TRẠNG THÁI)
     // =========================
+    AnalyticsData analytics = analyze_data(sensorData);
 
+    // =========================
+    // 4. CONTROL BUZZER
+    // =========================
     if (analytics.alarm)
     {
         digitalWrite(BUZZER_PIN, BUZZER_ON);
+    }
+    else if (analytics.warning)
+    {
+        static unsigned long lastToggle = 0;
+        static bool buzzerState = false;
+
+        unsigned long now = millis();
+
+        if (now - lastToggle >= 150)
+        {
+            lastToggle = now;
+            buzzerState = !buzzerState;
+
+            digitalWrite(
+                BUZZER_PIN,
+                buzzerState ? BUZZER_ON : !BUZZER_ON);
+        }
     }
     else
     {
         digitalWrite(BUZZER_PIN, BUZZER_OFF);
     }
 
-    // ROR
-    float rorRate = 0.0;
-    float smoothT = 0.0;
-
-    HeatAlarmState state = rorDetector.update(sensorData.tempValue, rorRate, smoothT);
-
-
     // =========================
-    // 4. CREATE JSON DOCUMENT
+    // 5. CREATE JSON DOCUMENT
     // =========================
-
     JsonDocument doc;
 
     // =========================
-    // 5. BASIC INFORMATION
+    // 6. BASIC INFORMATION
     // =========================
-
     doc["node_id"] = NODE_ID;
-
-    // Tạm thời chưa có NTP
-    doc["timestamp"] = 0;
+    doc["timestamp"] = 0; // Tạm thời chưa có NTP
 
     // =========================
-    // 6. SENSOR DATA
+    // 7. SENSOR DATA
     // =========================
-
-    JsonObject sensors =
-        doc["sensors"].to<JsonObject>();
-
-    // DS18B20 
+    JsonObject sensors = doc["sensors"].to<JsonObject>();
     sensors["temp"] = sensorData.tempValue;
-
-    // MQ-2 hiện tại là ADC
-    sensors["smoke_adc"] =
-        sensorData.mq2Value;
-
-    // Flame
-    sensors["flame"] =
-        sensorData.flameDetected;
+    sensors["smoke_adc"] = sensorData.mq2Value;
+    sensors["flame"] = sensorData.flameDetected;
 
     // =========================
-    // 7. ANALYTICS
+    // 8. ANALYTICS
     // =========================
-
-    JsonObject analyticsObject =
-        doc["analytics"].to<JsonObject>();
-
+    JsonObject analyticsObject = doc["analytics"].to<JsonObject>();
     analyticsObject["ror"] = rorRate;
-
     analyticsObject["fri"] = nullptr;
 
     // =========================
-    // 8. ACTUATORS
+    // 9. ACTUATORS
     // =========================
-
-    JsonObject actuators =
-        doc["actuators"].to<JsonObject>();
-
+    JsonObject actuators = doc["actuators"].to<JsonObject>();
     actuators["relay"] = false;
-    actuators["buzzer"] =
-        analytics.alarm;
+    actuators["buzzer"] = analytics.alarm;
 
     // =========================
-    // 9. STATUS
+    // 10. STATUS & ERROR CODE
     // =========================
+    // Bắt buộc dùng getStatusString() để chuyển enum class sang chuỗi cho JSON
+    doc["status"] = analytics.getStatusString();
 
-    doc["status"] =
-        analytics.status;
-
-    // 0 = không có lỗi
-    doc["error_code"] = 0;
+    // Nếu trạng thái là FAULT_OFFLINE, gán mã lỗi tương ứng, ngược lại bằng 0
+    doc["error_code"] = (analytics.status == NodeStatus::FAULT_OFFLINE) ? 1 : 0;
 
     // =========================
-    // 10. SEND JSON
+    // 11. SEND JSON
     // =========================
-
     rs485_send_json(doc);
 
     // =========================
     // LOOP DELAY
     // =========================
-
     delay(1000);
 }

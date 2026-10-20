@@ -3,12 +3,12 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
-// Đặt BOT_TOKEN và CHAT_ID ở file .cpp để không bị lỗi trùng lặp biến
+
 const char* BOT_TOKEN = "8980177710:AAGKYWq7_rqSKkgAReds450gBkbXojWhwro";
 const char* CHAT_ID   = "6124667990";
 
 static unsigned long lastTelegramTime = 0;
-static const unsigned long TELEGRAM_COOLDOWN = 30000; // Chống spam: 30 giây gửi 1 lần
+static const unsigned long TELEGRAM_COOLDOWN = 30000; 
 
 void sendTelegramAlert(String nodeId, float temp, int smoke, float ror) {
     if (millis() - lastTelegramTime < TELEGRAM_COOLDOWN && lastTelegramTime != 0) {
