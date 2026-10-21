@@ -71,7 +71,7 @@ void loop()
     // =========================
     // 4. CONTROL BUZZER
     // =========================
-    if (analytics.alarm)
+    if (analytics.fire)
     {
         digitalWrite(BUZZER_PIN, BUZZER_ON);
     }
@@ -128,7 +128,7 @@ void loop()
     // =========================
     JsonObject actuators = doc["actuators"].to<JsonObject>();
     actuators["relay"] = false;
-    actuators["buzzer"] = analytics.alarm;
+    actuators["buzzer"] = analytics.fire;
 
     // =========================
     // 10. STATUS & ERROR CODE

@@ -102,12 +102,12 @@ function getAlertStyle(status: LiveNodeStatus) {
     case "fire":
       return {
         badge: "bg-red-100 text-red-700 border-transparent",
-        label: "BÁO CHÁY",
+        label: "BÁO CHÁY KHẨN CẤP",
       };
     case "warning":
       return {
         badge: "bg-amber-100 text-amber-700 border-transparent",
-        label: "CẢNH BÁO",
+        label: "CẢNH BÁO NGUY CƠ",
       };
     case "error":
       return {

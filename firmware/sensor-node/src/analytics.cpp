@@ -7,8 +7,8 @@
 #define TEMP_WARNING_THRESHOLD 40.0f
 #endif
 
-#ifndef TEMP_ALARM_THRESHOLD
-#define TEMP_ALARM_THRESHOLD 65.0f
+#ifndef TEMP_FIRE_THRESHOLD
+#define TEMP_FIRE_THRESHOLD 65.0f
 #endif
 
 #ifndef ROR_THRESHOLD_WARN
@@ -30,7 +30,7 @@ AnalyticsData analyze_data(const SensorData &sensorData, bool isTimeout)
         result.smokeDetected = false;
         result.flameDetected = sensorData.flameDetected;
         result.tempDetected = false;
-        result.alarm = false;
+        result.fire = false;
         result.status = NodeStatus::FAULT_OFFLINE;
         return result;
     }
@@ -44,14 +44,14 @@ AnalyticsData analyze_data(const SensorData &sensorData, bool isTimeout)
     // - Có lửa trực tiếp (Flame sensor)
     // - Hoặc nhiệt độ/khói vượt ngưỡng giới hạn tuyệt đối (Nhiệt độ > 65°C, Khói ADC > 850)
     // - Hoặc tốc độ gia tăng nhiệt độ (RoR) vượt ngưỡng cháy
-    const bool isAbsoluteLimitExceeded = (sensorData.tempValue >= TEMP_ALARM_THRESHOLD) || (sensorData.mq2Value >= MQ2_THRESHOLD);
-    const bool isRoRAlarm = (sensorData.rorRate >= ROR_THRESHOLD_FIRE);
+    const bool isAbsoluteLimitExceeded = (sensorData.tempValue >= TEMP_FIRE_THRESHOLD) || (sensorData.mq2Value >= MQ2_THRESHOLD);
+    const bool isRoRFire = (sensorData.rorRate >= ROR_THRESHOLD_FIRE);
 
-    if (result.flameDetected || isAbsoluteLimitExceeded || isRoRAlarm)
+    if (result.flameDetected || isAbsoluteLimitExceeded || isRoRFire)
     {
-        result.alarm = true;
+        result.fire = true;
         result.warning = false;
-        result.status = NodeStatus::ALARM;
+        result.status = NodeStatus::FIRE;
         return result;
     }
 
@@ -63,14 +63,14 @@ AnalyticsData analyze_data(const SensorData &sensorData, bool isTimeout)
 
     if (isWarningLimitExceeded)
     {
-        result.alarm = false;
+        result.fire = false;
         result.warning = true;
         result.status = NodeStatus::WARNING;
         return result;
     }
 
     // 5. Mặc định: Trạng thái Bình thường (NORMAL)
-    result.alarm = false;
+    result.fire = false;
     result.status = NodeStatus::NORMAL;
 
     return result;
