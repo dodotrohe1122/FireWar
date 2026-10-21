@@ -74,12 +74,8 @@ export function getLiveNodeStatus(
 
 export function getReportedNodeStatus(node: LiveNode): LiveNodeStatus {
   if (node.error_code !== 0 || node.status === "SENSOR_ERROR") return "error";
-  if (node.sensors.flame) return "fire";
   if (node.status === "WARNING") return "warning";
-  if (node.status === "FIRE") {
-    // Older gateway firmware reported FIRE for every non-empty status string.
-    return node.sensors.smoke_adc >= 230 ? "warning" : "normal";
-  }
+  if (node.status === "FIRE") return "fire";
   if (node.status === "NORMAL") return "normal";
   return "error";
 }
